@@ -1,6 +1,6 @@
 <?php
 
-namespace sa6bom\HetznerStorageBox\Mails;
+namespace Paymenter\Extensions\Servers\HetznerStorageBox\Mails;
 
 use App\Models\User;
 use Illuminate\Bus\Queueable;
@@ -18,7 +18,6 @@ class StorageBoxCredentialsMail extends Mailable
         public readonly string $username,
         public readonly string $hostname,
         public readonly string $password,
-        public readonly bool   $sshKeyProvided,
         public readonly bool   $isReset = false,
     ) {}
 
@@ -33,6 +32,11 @@ class StorageBoxCredentialsMail extends Mailable
 
     public function content(): Content
     {
+        \Illuminate\Support\Facades\View::addNamespace(
+            'hetzner_storage_box',
+            __DIR__ . '/../resources/views'
+        );
+
         return new Content(
             view: 'hetzner_storage_box::credentials',
         );

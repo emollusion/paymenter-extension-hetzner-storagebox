@@ -1,6 +1,6 @@
 <?php
 
-namespace sa6bom\HetznerStorageBox\Models;
+namespace Paymenter\Extensions\Servers\HetznerStorageBox\Models;
 
 use App\Models\Service;
 use Illuminate\Database\Eloquent\Model;

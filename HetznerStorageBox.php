@@ -1,15 +1,15 @@
 <?php
 
-namespace sa6bom\HetznerStorageBox;
+namespace Paymenter\Extensions\Servers\HetznerStorageBox;
 
 use App\Attributes\ExtensionMeta;
 use App\Classes\Extension\Server;
-use App\Models\Product;
 use App\Models\Service;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
-use sa6bom\HetznerStorageBox\Mails\StorageBoxCredentialsMail;
-use sa6bom\HetznerStorageBox\Models\HetznerStorageBoxAccount;
+use Illuminate\Support\Facades\Session;
+use Paymenter\Extensions\Servers\HetznerStorageBox\Mails\StorageBoxCredentialsMail;
+use Paymenter\Extensions\Servers\HetznerStorageBox\Models\HetznerStorageBoxAccount;
 
 #[ExtensionMeta(
     name: 'HetznerStorageBox',
@@ -34,7 +34,7 @@ class HetznerStorageBox extends Server
         \App\Helpers\ExtensionHelper::rollbackMigrations('extension/Servers/HetznerStorageBox/database/migrations');
     }
 
-    public function upgraded(): void
+    public function upgraded($oldVersion = null): void
     {
         \App\Helpers\ExtensionHelper::runMigrations('extension/Servers/HetznerStorageBox/database/migrations');
     }
@@ -43,10 +43,6 @@ class HetznerStorageBox extends Server
     // Configuration
     // -------------------------------------------------------------------------
 
-    /**
-     * Extension-level settings shown in the Paymenter admin when configuring
-     * the server entry.
-     */
     public function getConfig($values = []): array
     {
         return [
@@ -73,10 +69,6 @@ class HetznerStorageBox extends Server
         ];
     }
 
-    /**
-     * Product-level settings shown in the Paymenter admin when configuring a
-     * product that uses this extension.
-     */
     public function getProductConfig($values = []): array
     {
         return [
@@ -87,9 +79,9 @@ class HetznerStorageBox extends Server
                 'required'    => true,
                 'options'     => [
                     'bx11' => 'BX11 — 1 TB',
-                    'bx21' => 'BX21 — 2 TB',
-                    'bx31' => 'BX31 — 5 TB',
-                    'bx41' => 'BX41 — 10 TB',
+                    'bx21' => 'BX21 — 5 TB',
+                    'bx31' => 'BX31 — 10 TB',
+                    'bx41' => 'BX41 — 20 TB',
                 ],
                 'description' => 'Hetzner Storage Box plan to provision.',
             ],
@@ -109,56 +101,23 @@ class HetznerStorageBox extends Server
         ];
     }
 
-    /**
-     * Checkout-level fields shown to the customer when placing an order.
-     */
-    public function getCheckoutConfig(Product $product, $values = [], $settings = []): array
-    {
-        return [
-            [
-                'name'        => 'ssh_public_key',
-                'label'       => 'SSH Public Key (optional)',
-                'type'        => 'textarea',
-                'required'    => false,
-                'description' => 'Paste your SSH public key (RSA, ECDSA, or Ed25519) to enable key-based authentication. Leave blank to use password authentication only.',
-                'validation'  => 'nullable',
-            ],
-        ];
-    }
-
     // -------------------------------------------------------------------------
     // Lifecycle hooks
     // -------------------------------------------------------------------------
 
-    /**
-     * Provision a new Storage Box when a service is activated.
-     */
     public function createServer(Service $service, $settings, $properties): void
     {
-        $settings = array_merge($settings, $properties);
+        $settings = array_merge($this->getServerSettings($service), $settings, $properties);
         $apiToken = $settings['api_token'];
         $boxType  = $settings['storage_box_type'];
-        $location = (array_key_exists('location', $settings) && $settings['location'] !== '')
+        $location = (array_key_exists('location', $settings) && !empty($settings['location']))
             ? $settings['location']
             : $settings['default_location'];
-        $sshKey   = array_key_exists('ssh_public_key', $properties)
-            ? trim($properties['ssh_public_key'])
-            : '';
-
-        // Validate SSH key format if provided.
-        if ($sshKey !== '' && !$this->isValidSshPublicKey($sshKey)) {
-            throw new \RuntimeException('The provided SSH public key is not valid.');
-        }
 
         $password = $this->generatePassword();
         $boxName  = $this->buildBoxName($service);
         $client   = $this->makeClient($apiToken);
 
-        // Access settings: only secure protocols.
-        // Note: ftps is not a separate flag — FTPS is part of FTP subsystem on
-        // Hetzner Storage Boxes and controlled at the network/TLS level, not here.
-        // The API access_settings fields are: ssh_enabled, samba_enabled,
-        // webdav_enabled, zfs_enabled, reachable_externally.
         $accessSettings = [
             'ssh_enabled'          => true,
             'samba_enabled'        => true,
@@ -167,56 +126,56 @@ class HetznerStorageBox extends Server
             'reachable_externally' => true,
         ];
 
-        $payload = [
-            'name'              => $boxName,
-            'password'          => $password,
-            'location'          => $location,
-            'storage_box_type'  => $boxType,
-            'access_settings'   => $accessSettings,
-        ];
-
-        // ssh_keys on the create endpoint takes raw OpenSSH public key strings
-        // directly — no prior registration step needed.
-        if ($sshKey !== '') {
-            $payload['ssh_keys'] = [$sshKey];
-        }
-
-        $response = $client->post('/v1/storage_boxes', $payload);
-
-        $box      = $response['storage_box'];
-        $boxId    = $box['id'];
-        $username = $box['username'];
-        $hostname = $box['server']; // e.g. u45321.your-storagebox.de
-
-        // The create action is async. Wait for it to complete before
-        // considering provisioning done.
-        $actionId = $response['action']['id'];
-        $client->waitForAction($actionId);
-
-        // Persist account metadata. Password is never stored.
-        HetznerStorageBoxAccount::create([
-            'service_id'     => $service->id,
-            'hetzner_box_id' => $boxId,
-            'username'       => $username,
-            'hostname'       => $hostname,
-            'box_type'       => $boxType,
-            'location'       => $location,
-            'status'         => 'active',
-            'provisioned_at' => now(),
+        $response = $client->post('/v1/storage_boxes', [
+            'name'             => $boxName,
+            'password'         => $password,
+            'location'         => $location,
+            'storage_box_type' => $boxType,
+            'access_settings'  => $accessSettings,
         ]);
 
-        // Email credentials — the only time the plaintext password is used.
-        $this->sendCredentialsMail($service, $username, $hostname, $password, $sshKey !== '');
+        $boxId = $response['storage_box']['id'];
+
+        // Log the Hetzner box ID immediately so it can be recovered manually
+        // if any subsequent step (action wait, re-fetch, DB insert, mail) fails.
+        Log::info("HetznerStorageBox: created box #{$boxId} for service #{$service->id}, awaiting action #{$response['action']['id']}");
+
+        try {
+            $client->waitForAction($response['action']['id']);
+
+            // Re-fetch after action completes — username and server fields are
+            // null in the create response and only populated once initialised.
+            $box      = $client->get("/v1/storage_boxes/{$boxId}")['storage_box'];
+            $username = $box['username'];
+            $hostname = $box['server'];
+
+            HetznerStorageBoxAccount::create([
+                'service_id'     => $service->id,
+                'hetzner_box_id' => $boxId,
+                'username'       => $username,
+                'hostname'       => $hostname,
+                'box_type'       => $boxType,
+                'location'       => $location,
+                'status'         => 'active',
+                'provisioned_at' => now(),
+            ]);
+
+            $this->sendCredentialsMail($service, $username, $hostname, $password);
+
+        } catch (\Throwable $e) {
+            Log::error(
+                "HetznerStorageBox: provisioning failed for service #{$service->id} " .
+                "(Hetzner box #{$boxId} may require manual cleanup): {$e->getMessage()}"
+            );
+            throw $e;
+        }
     }
 
-    /**
-     * Suspend a service: disable external reachability.
-     * Supports partial updates — only reachable_externally needs to be sent.
-     */
     public function suspendServer(Service $service, $settings, $properties): void
     {
-        $account = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
-        $client  = $this->makeClient($settings['api_token']);
+        $settings = $this->getServerSettings($service);
+        $account  = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
+        $client   = $this->makeClient($settings['api_token']);
 
         $response = $client->post("/v1/storage_boxes/{$account->hetzner_box_id}/actions/update_access_settings", [
             'reachable_externally' => false,
@@ -227,13 +186,11 @@ class HetznerStorageBox extends Server
         $account->update(['status' => 'suspended']);
     }
 
-    /**
-     * Unsuspend a service: restore external reachability and all enabled protocols.
-     */
     public function unsuspendServer(Service $service, $settings, $properties): void
     {
-        $account = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
-        $client  = $this->makeClient($settings['api_token']);
+        $settings = $this->getServerSettings($service);
+        $account  = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
+        $client   = $this->makeClient($settings['api_token']);
 
         $response = $client->post("/v1/storage_boxes/{$account->hetzner_box_id}/actions/update_access_settings", [
             'reachable_externally' => true,
@@ -247,18 +204,14 @@ class HetznerStorageBox extends Server
         $account->update(['status' => 'active']);
     }
 
-    /**
-     * Terminate a service: delete the Storage Box entirely.
-     * Delete is also async and returns an action.
-     */
     public function terminateServer(Service $service, $settings, $properties): void
     {
-        $account = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
-        $client  = $this->makeClient($settings['api_token']);
+        $settings = $this->getServerSettings($service);
+        $account  = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
+        $client   = $this->makeClient($settings['api_token']);
 
         $response = $client->delete("/v1/storage_boxes/{$account->hetzner_box_id}");
 
-        // Delete returns an action body (not 204).
         if (!empty($response['action']['id'])) {
             $client->waitForAction($response['action']['id']);
         }
@@ -266,12 +219,9 @@ class HetznerStorageBox extends Server
         $account->update(['status' => 'terminated']);
     }
 
-    /**
-     * Upgrade or downgrade a Storage Box to a different plan.
-     */
     public function upgradeServer(Service $service, $settings, $properties): void
     {
-        $settings   = array_merge($settings, $properties);
+        $settings   = array_merge($this->getServerSettings($service), $settings, $properties);
         $account    = HetznerStorageBoxAccount::where('service_id', $service->id)->firstOrFail();
         $client     = $this->makeClient($settings['api_token']);
         $newBoxType = $settings['storage_box_type'];
@@ -289,9 +239,6 @@ class HetznerStorageBox extends Server
     // Customer panel actions
     // -------------------------------------------------------------------------
 
-    /**
-     * Actions shown on the customer's service page.
-     */
     public function getActions(Service $service, $settings, $properties): array
     {
         $account = HetznerStorageBoxAccount::where('service_id', $service->id)->first();
@@ -330,13 +277,6 @@ class HetznerStorageBox extends Server
         ];
     }
 
-    /**
-     * Reset the Storage Box password and email the new one to the customer.
-     * Called when the customer clicks "Regenerate Password".
-     *
-     * The new password is supplied by us to the API — Hetzner does not
-     * generate it on our behalf.
-     */
     public function regeneratePassword(Service $service): string
     {
         $settings    = $this->getServerSettings($service);
@@ -350,17 +290,23 @@ class HetznerStorageBox extends Server
 
         $client->waitForAction($response['action']['id']);
 
-        // Password discarded after mail is queued — never stored.
+        // Password discarded after mail is sent — never stored.
         $this->sendCredentialsMail(
             $service,
             $account->username,
             $account->hostname,
             $newPassword,
-            sshKeyProvided: false,
             isReset: true,
         );
 
-        return 'New credentials have been sent to your email address.';
+        // Store a success notification in the session so it displays after
+        // the redirect — this is the native Paymenter notification pattern.
+        \Illuminate\Support\Facades\Session::put('notification', [
+            'message' => 'New credentials have been sent to your email address.',
+            'type'    => 'success',
+        ]);
+
+        return route('services.show', $service->id);
     }
 
     // -------------------------------------------------------------------------
@@ -373,102 +319,92 @@ class HetznerStorageBox extends Server
      */
     private function buildBoxName(Service $service): string
     {
-        $email = $service->user->email ?? 'customer';
-        $slug  = strtolower(preg_replace('/[^a-z0-9]/i', '', explode('@', $email)[0]));
+        $email = $service->user->email ?? '';
+        $local = explode('@', $email)[0];
+        $slug  = strtolower(preg_replace('/[^a-z0-9]/i', '', $local));
         $slug  = substr($slug, 0, 20);
+
+        // Fallback if the local part contained no alphanumeric characters.
+        if ($slug === '') {
+            $slug = 'box';
+        }
+
         return "{$slug}-{$service->id}";
     }
 
     /**
-     * Validate a customer-provided SSH public key.
-     * Accepts RSA, ECDSA (nistp256/384/521), and Ed25519.
-     */
-    private function isValidSshPublicKey(string $key): bool
-    {
-        $parts = explode(' ', trim($key));
-        if (count($parts) < 2) {
-            return false;
-        }
-
-        $allowedTypes = [
-            'ssh-rsa',
-            'ecdsa-sha2-nistp256',
-            'ecdsa-sha2-nistp384',
-            'ecdsa-sha2-nistp521',
-            'ssh-ed25519',
-        ];
-
-        if (!in_array($parts[0], $allowedTypes, true)) {
-            return false;
-        }
-
-        // Key material must be valid base64.
-        $decoded = base64_decode($parts[1], strict: true);
-        return $decoded !== false && strlen($decoded) > 0;
-    }
-
-    /**
-     * Generate a strong random password that satisfies Hetzner's policy:
-     * 12–128 chars, must contain upper, lower, digit, and special character.
-     * Only uses characters from Hetzner's allowed set.
+     * Generate a cryptographically secure random password satisfying Hetzner's
+     * password policy: 12–128 chars, must include upper, lower, digit, and
+     * one of the allowed special characters.
      */
     private function generatePassword(): string
     {
-        // Hetzner allowed special chars: ^ ° ! § $ % / ( ) = ? + # - . , ; : ~ * @ { } _ &
         $lower   = 'abcdefghijklmnopqrstuvwxyz';
         $upper   = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
         $digits  = '0123456789';
         $special = '!$%/()=?+#-.,:~*@_&';
         $all     = $lower . $upper . $digits . $special;
 
-        // Guarantee at least one of each required character class.
-        $password  = $lower[random_int(0, strlen($lower) - 1)];
-        $password .= $upper[random_int(0, strlen($upper) - 1)];
-        $password .= $digits[random_int(0, strlen($digits) - 1)];
-        $password .= $special[random_int(0, strlen($special) - 1)];
+        // Guarantee at least one character from each required class.
+        $chars   = [];
+        $chars[] = $lower[random_int(0, strlen($lower) - 1)];
+        $chars[] = $upper[random_int(0, strlen($upper) - 1)];
+        $chars[] = $digits[random_int(0, strlen($digits) - 1)];
+        $chars[] = $special[random_int(0, strlen($special) - 1)];
 
-        // Fill to 32 chars total.
         for ($i = 4; $i < 32; $i++) {
-            $password .= $all[random_int(0, strlen($all) - 1)];
+            $chars[] = $all[random_int(0, strlen($all) - 1)];
         }
 
-        // Shuffle to avoid predictable prefix pattern.
-        return str_shuffle($password);
+        // Cryptographically secure Fisher-Yates shuffle.
+        for ($i = count($chars) - 1; $i > 0; $i--) {
+            $j          = random_int(0, $i);
+            [$chars[$i], $chars[$j]] = [$chars[$j], $chars[$i]];
+        }
+
+        return implode('', $chars);
     }
 
-    /**
-     * Send credentials email to the service owner.
-     */
     private function sendCredentialsMail(
         Service $service,
         string $username,
         string $hostname,
         string $password,
-        bool $sshKeyProvided,
         bool $isReset = false,
     ): void {
         Mail::to($service->user->email)->send(new StorageBoxCredentialsMail(
-            user:           $service->user,
-            username:       $username,
-            hostname:       $hostname,
-            password:       $password,
-            sshKeyProvided: $sshKeyProvided,
-            isReset:        $isReset,
+            user:     $service->user,
+            username: $username,
+            hostname: $hostname,
+            password: $password,
+            isReset:  $isReset,
         ));
     }
 
     /**
-     * Load server-level settings from the service's product server configuration.
-     * Mirrors the pattern established in the Virtualmin extension.
+     * Load server-level settings into a plain key => value array.
+     * The settings relation returns a Collection of objects with key/value
+     * properties, not a plain array.
      */
     private function getServerSettings(Service $service): array
     {
-        return $service->product->server->settings ?? [];
+        $serverSettings = $service->product->server?->settings;
+
+        if (!$serverSettings) {
+            throw new \RuntimeException(
+                "No server linked to product #{$service->product_id}. " .
+                "Assign the HetznerStorageBox server to the product in the admin panel."
+            );
+        }
+
+        $result = [];
+        foreach ($serverSettings as $setting) {
+            $result[$setting->key] = $setting->value;
+        }
+
+        return $result;
     }
 
-    /**
-     * Instantiate the Hetzner API client.
-     */
     private function makeClient(string $apiToken): HetznerApiClient
     {
         return new HetznerApiClient($apiToken);

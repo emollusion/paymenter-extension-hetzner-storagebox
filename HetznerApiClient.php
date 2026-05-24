@@ -1,21 +1,20 @@
 <?php
 
-namespace sa6bom\HetznerStorageBox;
+namespace Paymenter\Extensions\Servers\HetznerStorageBox;
 
 use Illuminate\Support\Facades\Http;
 
 /**
- * Thin wrapper around Laravel's HTTP client for the Hetzner API.
+ * HTTP client wrapper for the Hetzner API.
  *
  * Two base URLs are involved:
- *   - api.hetzner.cloud/v1  — Cloud resources (SSH keys registered in project)
  *   - api.hetzner.com/v1    — Storage Boxes and their actions
+ *   - api.hetzner.cloud/v1  — Cloud resources (SSH keys, etc.)
  *
- * Both accept the same Bearer token. The base URL is resolved automatically
- * from the path.
+ * The correct base URL is resolved automatically from the path.
  *
- * All Storage Box actions are asynchronous. Use waitForAction() after any
- * action call to block until the action completes or fails.
+ * All Storage Box mutating operations are asynchronous and return an action
+ * object. Use waitForAction() to block until the action completes or fails.
  */
 class HetznerApiClient
 {
@@ -38,13 +37,8 @@ class HetznerApiClient
         return $this->request('POST', $path, $body);
     }
 
-    public function put(string $path, array $body = []): array
-    {
-        return $this->request('PUT', $path, $body);
-    }
-
     /**
-     * DELETE returns an action body for Storage Boxes (not 204).
+     * DELETE returns an action body for Storage Boxes (not 204 No Content).
      */
     public function delete(string $path): array
     {
@@ -55,13 +49,18 @@ class HetznerApiClient
      * Poll the Storage Box actions endpoint until the action reaches a
      * terminal state (success or error).
      *
-     * @throws \RuntimeException if the action fails or times out.
+     * Sleeps before polling to avoid hammering the API on fast operations.
+     *
+     * @throws \RuntimeException if the action fails or the timeout is exceeded.
      */
     public function waitForAction(int $actionId): void
     {
         $elapsed = 0;
 
         while ($elapsed < self::ACTION_TIMEOUT_SECONDS) {
+            sleep(self::ACTION_POLL_INTERVAL);
+            $elapsed += self::ACTION_POLL_INTERVAL;
+
             $response = $this->get("/v1/storage_boxes/actions/{$actionId}");
             $status   = $response['action']['status'] ?? 'unknown';
 
@@ -73,9 +72,6 @@ class HetznerApiClient
                 $message = $response['action']['error']['message'] ?? 'Unknown error';
                 throw new \RuntimeException("Hetzner action {$actionId} failed: {$message}");
             }
-
-            sleep(self::ACTION_POLL_INTERVAL);
-            $elapsed += self::ACTION_POLL_INTERVAL;
         }
 
         throw new \RuntimeException(
@@ -93,7 +89,6 @@ class HetznerApiClient
         $response = match ($method) {
             'GET'    => $pending->get($url),
             'POST'   => $pending->post($url, $body),
-            'PUT'    => $pending->put($url, $body),
             'DELETE' => $pending->delete($url),
             default  => throw new \InvalidArgumentException("Unsupported HTTP method: {$method}"),
         };
@@ -109,14 +104,15 @@ class HetznerApiClient
     }
 
     /**
-     * Storage Box paths (including actions) go to api.hetzner.com.
-     * Everything else (SSH keys) goes to api.hetzner.cloud.
+     * Storage Box paths (including their actions) go to api.hetzner.com.
+     * Everything else goes to api.hetzner.cloud.
      */
     private function baseUrl(string $path): string
     {
         if (str_contains($path, 'storage_box')) {
             return self::STORAGE_BASE;
         }
+
         return self::CLOUD_BASE;
     }
 }

@@ -63,7 +63,7 @@ Create or edit a product and select your HetznerStorageBox server. Under the **S
 
 | Field | Description |
 |---|---|
-| Storage Box Plan | BX11 (1 TB), BX21 (2 TB), BX31 (5 TB), or BX41 (10 TB) |
+| Storage Box Plan | BX11 (1 TB), BX21 (5 TB), BX31 (10 TB), or BX41 (20 TB) |
 | Location Override | Optional — leave blank to use the extension default |
 
 ### 4. Checkout options

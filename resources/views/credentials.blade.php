@@ -38,23 +38,13 @@
     <p><strong>SFTP (recommended)</strong></p>
     <pre style="background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto;">sftp -P 23 {{ $username }}@{{ $hostname }}</pre>
 
-    <p><strong>SCP / rsync / BorgBackup</strong> — also available via port 22 and 23.</p>
     <p><strong>WebDAV</strong> — connect to <code>https://{{ $hostname }}</code> with your username and password.</p>
     <p><strong>Samba/CIFS</strong> — mount <code>\\{{ $hostname }}\{{ $username }}</code>.</p>
     <p><strong>FTPS</strong> — connect to <code>{{ $hostname }}</code> on port 21 with explicit TLS.</p>
 
-    @if ($sshKeyProvided)
-        <p style="background: #e8f5e9; padding: 12px; border-radius: 4px;">
-            ✓ Your SSH public key was registered during provisioning. You can authenticate
-            without a password over SFTP/SSH once your key is set up.
-        </p>
-    @else
-        <h3>Adding an SSH key (optional)</h3>
-        <p>To enable passwordless authentication, connect with your password and run:</p>
-        <pre style="background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto;">cat ~/.ssh/id_ed25519.pub | ssh -p23 {{ $username }}@{{ $hostname }} install-ssh-key</pre>
-        <p>Or use <code>ssh-copy-id</code> for port 23:</p>
-        <pre style="background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto;">ssh-copy-id -p 23 -s {{ $username }}@{{ $hostname }}</pre>
-    @endif
+    <h3>Adding an SSH key (optional)</h3>
+    <p>To enable passwordless authentication, connect with your password and run:</p>
+    <pre style="background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto;">cat ~/.ssh/id_ed25519.pub | ssh -p23 {{ $username }}@{{ $hostname }} install-ssh-key</pre>
 
     <p style="margin-top: 32px; color: #666; font-size: 0.9em;">
         If you did not request a password reset, please contact support immediately.<br>
